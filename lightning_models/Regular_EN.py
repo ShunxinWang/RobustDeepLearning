@@ -7,7 +7,7 @@ import pytorch_lightning as pl
 import torch.nn as nn
 from pytorch_lightning.callbacks import EarlyStopping
 from pytorch_lightning import metrics
-from torch.optim.lr_scheduler import StepLR,ReduceLROnPlateau
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 # -----------------------------------------------------------------------------------------
 class Flatten(nn.Module):
@@ -18,7 +18,7 @@ class Reshape(nn.Module):
         return input.view(-1,512,8,8)
 
 class Regular_En(LightningModule):
-    def __init__(self,laten_dims: int,lr=0.00109648):
+    def __init__(self,laten_dims: int,lr=0.000488966):
         super(Regular_En, self).__init__()
         self.save_hyperparameters()
         self.lr = lr
@@ -64,6 +64,7 @@ class Regular_En(LightningModule):
         criterion = nn.CrossEntropyLoss()
         loss = criterion(y_hat, y)
         self.log_dict({'train_loss': loss}, on_epoch=True,on_step=True)
+        self.log_dict({'train_classification_loss': loss}, on_epoch=True,on_step=True)
         return loss
 
         

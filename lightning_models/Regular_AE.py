@@ -7,7 +7,7 @@ from pytorch_lightning.core.lightning import LightningModule
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping
 from pytorch_lightning import metrics
-from torch.optim.lr_scheduler import StepLR,ReduceLROnPlateau
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from pytorch_lightning.loggers.tensorboard import TensorBoardLogger
 # -----------------------------------------------------------------------------------------
 class Flatten(nn.Module):
@@ -18,11 +18,12 @@ class Reshape(nn.Module):
         return input.view(-1,512,8,8)
 
 class Regular_AE(LightningModule):
-    def __init__(self,laten_dims: int, lr=0.0005248):
+    def __init__(self,laten_dims: int, weight = 1, lr=0.00105737):
         super(Regular_AE, self).__init__()
         self.save_hyperparameters()
         self.lr = lr
         self.laten_dims = laten_dims
+        self.weight = weight
         self.test_acc = metrics.Accuracy()
 
         self.encoder = nn.Sequential(
@@ -76,8 +77,12 @@ class Regular_AE(LightningModule):
         criterion1 = nn.CrossEntropyLoss()
         criterion2 = nn.BCELoss()
         loss1 = criterion1(y_hat, y)
+        # with open('loss1.txt','a') as f:
+
+        #     print(loss1.item(),file=f)
+        # f.close()
         loss2 = criterion2(rct,x)
-        loss = loss1 + 0.01*loss2
+        loss = loss1 + self.weight*loss2
         self.log_dict({'train_classification_loss': loss1}, on_epoch=True,on_step=True)
         self.log_dict({'train_reconstruction_loss': loss2}, on_epoch=True,on_step=True)
         self.log_dict({'train_loss': loss}, on_epoch=True,on_step=True)
@@ -90,9 +95,9 @@ class Regular_AE(LightningModule):
         criterion2 = nn.BCELoss()
         loss1 = criterion1(y_hat, y)
         loss2 = criterion2(rct,x)
-        self.val_loss = loss1 + 0.01*loss2
+        self.val_loss = loss1 + self.weight*loss2
         self.log_dict( {'val_loss':  self.val_loss}, on_epoch=True,on_step=True)
-        return  self.val_loss
+        return self.val_loss
 
     def test_step(self, batch, batch_idx):
         x, y = batch
@@ -115,7 +120,6 @@ class Regular_AE(LightningModule):
 
         # train/val split
         cifar_train2, cifar_val =  torch.utils.data.random_split(cifar_train, [45000, 5000])
-        print(len(cifar_train2))
 
         # assign to use in dataloaders
         self.train_dataset = cifar_train2
@@ -133,14 +137,15 @@ class Regular_AE(LightningModule):
         return torch.utils.data.DataLoader(self.val_dataset, batch_size=100,num_workers=64)
 
 def main(): 
-    logger = TensorBoardLogger("lightning", name="Regular_AE_wet",log_graph=True)
+    for weight in (0.01,0.1,1,2,4,8):
+        logger = TensorBoardLogger("lightning", name="Regular_AE", version = 'weight'+str(weight),log_graph=True)
 
-    latent_dims = 64
-    model = Regular_AE(latent_dims)
-    early_stopping = EarlyStopping('val_loss',patience=30)
-    trainer = pl.Trainer(progress_bar_refresh_rate=0,logger=logger, callbacks=early_stopping,gpus= -1,  max_epochs=200)# , gpus='0',log_every_n_steps=10,val_check_interval=0.25)
-    trainer.fit(model)
-    trainer.test()
+        latent_dims = 64
+        model = Regular_AE(latent_dims,weight=weight)
+        early_stopping = EarlyStopping('val_loss',patience=30)
+        trainer = pl.Trainer(progress_bar_refresh_rate=0,logger=logger, callbacks=early_stopping,gpus= -1,  max_epochs=200)# , gpus='0',log_every_n_steps=10,val_check_interval=0.25)
+        trainer.fit(model)
+        trainer.test()
 
 if __name__ == '__main__':
     main()

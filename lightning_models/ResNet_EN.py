@@ -42,7 +42,7 @@ class BasicBlock(nn.Module):
 
 # ResNet
 class ResNet(LightningModule):
-    def __init__(self, block,  num_blocks,  num_classes=10, lr=0.0002512):
+    def __init__(self, block,  num_blocks,  num_classes=10, lr=0.0001202264):
         super(ResNet, self).__init__()
         self.save_hyperparameters()
         self.lr = lr
@@ -91,6 +91,7 @@ class ResNet(LightningModule):
         criterion = nn.CrossEntropyLoss()
         loss = criterion(y_hat, y)
         self.log_dict({'train_loss': loss}, on_epoch=True,on_step=True)
+        self.log_dict({'train_classification_loss': loss}, on_epoch=True,on_step=True)
         return loss
 
     def validation_step(self, batch, batch_idx):

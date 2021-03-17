@@ -1,15 +1,19 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+from torch import optim
+from torch.optim import optimizer
 import torchvision
+import matplotlib.pyplot as plt
 import torchvision.transforms as transforms
+import numpy as np
+from sklearn.manifold import TSNE as tsne
 
 from pytorch_lightning.core.lightning import LightningModule
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping
 from pytorch_lightning import metrics
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import StepLR,ReduceLROnPlateau
 from pytorch_lightning.loggers.tensorboard import TensorBoardLogger
 
 class BasicBlock(nn.Module):
@@ -43,31 +47,37 @@ class Upconvblock(nn.Module):
     expansion = 16
     def __init__(self,in_planes,output_channels, stride=1):
         super(Upconvblock,self).__init__()
-        if stride == 1:
-            self.scaleup = nn.Conv2d(in_planes,output_channels,kernel_size=3,padding=1)
-        elif stride == 2:
-            self.scaleup = nn.ConvTranspose2d(in_planes,output_channels,kernel_size=2,stride=stride)
-        # self.scaleup = nn.ConvTranspose2d(in_planes,output_channels,kernel_size=2,stride=2)
-        # self.scaleup = nn.Upsample(scale_factor=stride,mode="bilinear",align_corners=True)
-        self.conv1 = nn.Conv2d(output_channels,output_channels,stride = 1,kernel_size=3,padding=1)
+        self.convT1 = nn.ConvTranspose2d(
+            in_planes, output_channels, kernel_size=stride, stride=stride)
         self.bn1 = nn.BatchNorm2d(output_channels)
-        self.conv2 = nn.Conv2d(output_channels,output_channels,stride=1,kernel_size=3,padding=1)
+        self.convT2 = nn.ConvTranspose2d(output_channels, output_channels, kernel_size=1,stride=1)
         self.bn2 = nn.BatchNorm2d(output_channels)
+
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_planes != output_channels:
+            self.shortcut = nn.Sequential(
+                nn.Upsample(scale_factor=stride,mode="bilinear",align_corners=True),
+                nn.Conv2d(in_planes, output_channels,
+                          kernel_size=3, stride=1, padding=1, bias=False),
+                nn.BatchNorm2d(output_channels)
+            )
+
     
     def forward(self, x):
-        x = self.scaleup(x)
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = F.relu(self.bn2(self.conv2(x)))
+        out = F.relu(self.bn1(self.convT1(x)))
+        out = self.bn2(self.convT2(out))
+        out += self.shortcut(x)
+        out = F.relu(out)
+        return out
 
-        return x
-
-class ResNet_AE(LightningModule):
-    def __init__(self, block_en, block_de, num_blocks, latent_dims=256, lr = 0.000263827,weight = 1):
-        super(ResNet_AE, self).__init__()
+class ResNet_AE_sym(LightningModule):
+    def __init__(self, block_en, block_de, num_blocks, latent_dims=256, lr = 0.001233721699,weight=1):
+        super(ResNet_AE_sym, self).__init__()
         self.save_hyperparameters()
         self.lr = lr
         self.test_acc = metrics.Accuracy()
         self.weight = weight
+
         self.in_planes = 64
         self.latent_dims = latent_dims
         self.conv1 = nn.Conv2d(3, 64, kernel_size=3,
@@ -79,10 +89,10 @@ class ResNet_AE(LightningModule):
         self.layer4 = self._make_layer(block_en, 512, num_blocks[3], stride=2)
         self.linear = nn.Linear(512*block_en.expansion, latent_dims)
         self.linear2 = nn.Linear(latent_dims,512*block_de.expansion)
-        # self.layer5 = self._make_layer(block_de,512,num_blocks[3],stride=2)
-        self.layer6 = self._make_uplayer(block_de,256,num_blocks[2],stride=2)
-        self.layer7 = self._make_uplayer(block_de,128,num_blocks[1], stride=2)
-        self.layer8 = self._make_uplayer(block_de,64,num_blocks[0],stride=2)
+        self.layer5 = self._make_uplayer(block_de,256,num_blocks[3],stride=2)
+        self.layer6 = self._make_uplayer(block_de,128,num_blocks[2],stride=2)
+        self.layer7 = self._make_uplayer(block_de,64,num_blocks[1], stride=2)
+        self.layer8 = self._make_uplayer(block_de,64,num_blocks[0],stride=1)
         self.conv2 = nn.Sequential(
             nn.Conv2d(64,3,kernel_size=3,padding=1),
             nn.Sigmoid()
@@ -104,11 +114,13 @@ class ResNet_AE(LightningModule):
         return nn.Sequential(*layers)
 
     def _make_uplayer(self, block,planes,num_blocks,stride):
-        strides = [stride] + [1]*(num_blocks - 1)
+        strides =  [1]*(num_blocks - 1) + [stride] 
         layers = []
+        output_channels = self.in_planes
         for stride in strides:
-            layers.append(block(self.in_planes, planes, stride))
-            self.in_planes = planes
+            layers.append(block(self.in_planes, output_channels, stride))
+            output_channels = planes
+        self.in_planes = planes
         return nn.Sequential(*layers)
 
     
@@ -126,7 +138,7 @@ class ResNet_AE(LightningModule):
 
         out = self.linear2(enc)
         out = out.view(-1,512,4,4)
-        # out = self.layer5(out)
+        out = self.layer5(out)
         out = self.layer6(out)
         out = self.layer7(out)
         out = self.layer8(out)
@@ -205,14 +217,12 @@ class ResNet_AE(LightningModule):
     def val_dataloader(self):
         return torch.utils.data.DataLoader(self.val_dataset, batch_size=100,num_workers=64)
 
-
-
 def main():#:args):
     for weight in (0.01,0.1,1,2,4,8):
-        logger = TensorBoardLogger("lightning", name="ResNet_AE",version = 'weight' + str(weight),log_graph=True)
+        logger = TensorBoardLogger("lightning", name="ResNet_AE_sym",version ='weight'+str(weight),log_graph=True)
 
         latent_dims = 64
-        model = ResNet_AE(BasicBlock, Upconvblock, [2, 2, 2, 2],latent_dims=latent_dims, weight=weight)
+        model = ResNet_AE_sym(BasicBlock, Upconvblock, [2, 2, 2, 2],latent_dims=latent_dims,weight=weight)
         early_stopping = EarlyStopping('val_loss',patience=30)
         trainer = pl.Trainer(progress_bar_refresh_rate=0,logger=logger,callbacks=early_stopping, gpus= -1,  max_epochs=100)# , gpus='0',log_every_n_steps=10,val_check_interval=0.25)
         trainer.fit(model)

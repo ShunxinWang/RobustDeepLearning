@@ -3,13 +3,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import torchvision
+
 import torchvision.transforms as transforms
+
+from collections import OrderedDict
 
 from pytorch_lightning.core.lightning import LightningModule
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping
 from pytorch_lightning import metrics
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import StepLR,ReduceLROnPlateau
 from pytorch_lightning.loggers.tensorboard import TensorBoardLogger
 
 class BasicBlock(nn.Module):
@@ -39,35 +42,15 @@ class BasicBlock(nn.Module):
         out = F.relu(out)
         return out
 
-class Upconvblock(nn.Module):
-    expansion = 16
-    def __init__(self,in_planes,output_channels, stride=1):
-        super(Upconvblock,self).__init__()
-        if stride == 1:
-            self.scaleup = nn.Conv2d(in_planes,output_channels,kernel_size=3,padding=1)
-        elif stride == 2:
-            self.scaleup = nn.ConvTranspose2d(in_planes,output_channels,kernel_size=2,stride=stride)
-        # self.scaleup = nn.ConvTranspose2d(in_planes,output_channels,kernel_size=2,stride=2)
-        # self.scaleup = nn.Upsample(scale_factor=stride,mode="bilinear",align_corners=True)
-        self.conv1 = nn.Conv2d(output_channels,output_channels,stride = 1,kernel_size=3,padding=1)
-        self.bn1 = nn.BatchNorm2d(output_channels)
-        self.conv2 = nn.Conv2d(output_channels,output_channels,stride=1,kernel_size=3,padding=1)
-        self.bn2 = nn.BatchNorm2d(output_channels)
-    
-    def forward(self, x):
-        x = self.scaleup(x)
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = F.relu(self.bn2(self.conv2(x)))
 
-        return x
-
-class ResNet_AE(LightningModule):
-    def __init__(self, block_en, block_de, num_blocks, latent_dims=256, lr = 0.000263827,weight = 1):
-        super(ResNet_AE, self).__init__()
+class ResNet_AE_skip(LightningModule):
+    def __init__(self, block_en, num_blocks, latent_dims=256, lr = 0.0006656691,weight=1):
+        super(ResNet_AE_skip, self).__init__()
         self.save_hyperparameters()
         self.lr = lr
         self.test_acc = metrics.Accuracy()
         self.weight = weight
+
         self.in_planes = 64
         self.latent_dims = latent_dims
         self.conv1 = nn.Conv2d(3, 64, kernel_size=3,
@@ -77,14 +60,21 @@ class ResNet_AE(LightningModule):
         self.layer2 = self._make_layer(block_en, 128, num_blocks[1], stride=2)
         self.layer3 = self._make_layer(block_en, 256, num_blocks[2], stride=2)
         self.layer4 = self._make_layer(block_en, 512, num_blocks[3], stride=2)
-        self.linear = nn.Linear(512*block_en.expansion, latent_dims)
-        self.linear2 = nn.Linear(latent_dims,512*block_de.expansion)
-        # self.layer5 = self._make_layer(block_de,512,num_blocks[3],stride=2)
-        self.layer6 = self._make_uplayer(block_de,256,num_blocks[2],stride=2)
-        self.layer7 = self._make_uplayer(block_de,128,num_blocks[1], stride=2)
-        self.layer8 = self._make_uplayer(block_de,64,num_blocks[0],stride=2)
+        self.linear = nn.Linear(512, latent_dims)
+        self.linear2 = nn.Linear(latent_dims,512*16)
+        
+        self.upconv4 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
+        self.decoder4 = ResNet_AE_skip._block(512, 256, name="dec4")
+        self.upconv3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.decoder3 = ResNet_AE_skip._block(256, 128, name="dec3")
+        self.upconv2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.decoder2 = ResNet_AE_skip._block(128, 64, name="dec2")
+        self.layer8 = self._make_layer(block_en, 64, num_blocks[0], stride=1)
+
+        
+
         self.conv2 = nn.Sequential(
-            nn.Conv2d(64,3,kernel_size=3,padding=1),
+            nn.Conv2d(64,3,kernel_size=1),
             nn.Sigmoid()
         )
         self.classifer = nn.Sequential(
@@ -98,39 +88,73 @@ class ResNet_AE(LightningModule):
     def _make_layer(self, block, planes, num_blocks, stride):
         strides = [stride] + [1]*(num_blocks-1)
         layers = []
+        if planes == 64:
+            self.in_planes = 64
         for stride in strides:
             layers.append(block(self.in_planes, planes, stride))
             self.in_planes = planes 
         return nn.Sequential(*layers)
 
-    def _make_uplayer(self, block,planes,num_blocks,stride):
-        strides = [stride] + [1]*(num_blocks - 1)
-        layers = []
-        for stride in strides:
-            layers.append(block(self.in_planes, planes, stride))
-            self.in_planes = planes
-        return nn.Sequential(*layers)
+    @staticmethod
+    def _block(in_channels, features, name):
+        return nn.Sequential(
+            OrderedDict(
+                [
+                    (
+                        name + "conv1",
+                        nn.Conv2d(
+                            in_channels=in_channels,
+                            out_channels=features,
+                            kernel_size=3,
+                            padding=1,
+                            bias=False,
+                        ),
+                    ),
+                    (name + "norm1", nn.BatchNorm2d(num_features=features)),
+                    (name + "relu1", nn.ReLU(inplace=True)),
+                    (
+                        name + "conv2",
+                        nn.Conv2d(
+                            in_channels=features,
+                            out_channels=features,
+                            kernel_size=3,
+                            padding=1,
+                            bias=False,
+                        ),
+                    ),
+                    (name + "norm2", nn.BatchNorm2d(num_features=features)),
+                    (name + "relu2", nn.ReLU(inplace=True)),
+                ]
+            )
+        )
 
     
     def forward(self, x):
         out = F.relu(self.bn1(self.conv1(x)))
-        out = self.layer1(out)
-        out = self.layer2(out)
-        out = self.layer3(out)
-        out = self.layer4(out)
-        out = F.avg_pool2d(out, 4)
+        out1 = self.layer1(out)
+        out2 = self.layer2(out1)
+        out3 = self.layer3(out2)
+        out4 = self.layer4(out3)
+        out = F.avg_pool2d(out4, 4)
         out = out.view(out.size(0), -1) # flatten
         enc = self.linear(out)
         
         prediction = self.classifer(enc)
-
+        
         out = self.linear2(enc)
         out = out.view(-1,512,4,4)
-        # out = self.layer5(out)
-        out = self.layer6(out)
-        out = self.layer7(out)
-        out = self.layer8(out)
-        out = self.conv2(out)
+        dec4 = self.upconv4(out)
+        dec4 = torch.cat((dec4, out3), dim=1)
+        dec4 = self.decoder4(dec4)
+        dec3 = self.upconv3(dec4)
+        dec3 = torch.cat((dec3, out2), dim=1)
+        dec3 = self.decoder3(dec3)
+        dec2 = self.upconv2(dec3)
+        dec2 = torch.cat((dec2, out1), dim=1)
+        dec2 = self.decoder2(dec2)
+        dec1 = self.layer8(dec2)
+        out = self.conv2(dec1)
+        
         return enc, out, prediction
 
     def configure_optimizers(self):
@@ -205,14 +229,12 @@ class ResNet_AE(LightningModule):
     def val_dataloader(self):
         return torch.utils.data.DataLoader(self.val_dataset, batch_size=100,num_workers=64)
 
-
-
 def main():#:args):
     for weight in (0.01,0.1,1,2,4,8):
-        logger = TensorBoardLogger("lightning", name="ResNet_AE",version = 'weight' + str(weight),log_graph=True)
+        logger = TensorBoardLogger("lightning", name="ResNet_AE_skip",version ='weight'+str(weight),log_graph=True)
 
         latent_dims = 64
-        model = ResNet_AE(BasicBlock, Upconvblock, [2, 2, 2, 2],latent_dims=latent_dims, weight=weight)
+        model = ResNet_AE_skip(BasicBlock, [2, 2, 2, 2],latent_dims=latent_dims,weight=weight)
         early_stopping = EarlyStopping('val_loss',patience=30)
         trainer = pl.Trainer(progress_bar_refresh_rate=0,logger=logger,callbacks=early_stopping, gpus= -1,  max_epochs=100)# , gpus='0',log_every_n_steps=10,val_check_interval=0.25)
         trainer.fit(model)
